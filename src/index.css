@@ -1,0 +1,59 @@
+@import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700;900&family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:ital,wght@0,400;0,700;1,400&family=Cinzel+Decorative:wght@700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Space Grotesk", "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-gothic: "Cinzel", serif;
+  --font-gothic-deco: "Cinzel Decorative", serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+/* Custom styles for premium cyber-gothic look */
+.bg-grid-pattern {
+  background-size: 40px 40px;
+  background-image: 
+    linear-gradient(to right, rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+}
+
+.gothic-glow {
+  text-shadow: 0 0 10px rgba(239, 68, 68, 0.3), 0 0 20px rgba(168, 85, 247, 0.2);
+}
+
+.gothic-glow-cyan {
+  text-shadow: 0 0 8px rgba(34, 211, 238, 0.4);
+}
+
+/* Custom Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.6);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+/* Monolithic structure styles */
+.gothic-corner {
+  clip-path: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px));
+}
+
+.gothic-card-glow-cyan {
+  box-shadow: 0 0 30px rgba(6, 182, 212, 0.05), inset 0 0 15px rgba(6, 182, 212, 0.02);
+}
+
+.gothic-card-glow-purple {
+  box-shadow: 0 0 30px rgba(168, 85, 247, 0.05), inset 0 0 15px rgba(168, 85, 247, 0.02);
+}

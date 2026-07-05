@@ -1,0 +1,6 @@
+{
+  "name": "Pappy Project",
+  "description": "A premium cyberpunk AI operating system dashboard integrating advanced WhatsApp bot diagnostics, dynamic crop-free profile picture schedulers, and a conversational AI core.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
