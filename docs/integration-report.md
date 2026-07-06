@@ -71,3 +71,4 @@ Each bot has its own token and owner identifier. The backend forwards those sepa
 - WhatsApp service: `GET /stats`, `POST /pair`, `POST /action`.
 
 If the existing bot repos use different route names, add a tiny adapter inside each bot repo that maps these routes to their existing pairing/session functions instead of rewriting bot logic.
+<<<<

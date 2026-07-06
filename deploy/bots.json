@@ -1,0 +1,18 @@
+{
+  "pfp": {
+    "name": "pappy-pfp",
+    "repo": "https://github.com/pappy999666-dotcom/pappy-pfp.git",
+    "path": "/opt/pappy/pappy-pfp",
+    "port": 4101,
+    "start": "npm start",
+    "webLayer": "Layer Two: Profile Picture Center"
+  },
+  "whatsapp": {
+    "name": "verbose-fishstick",
+    "repo": "https://github.com/pappy999666-dotcom/verbose-fishstick.git",
+    "path": "/opt/pappy/verbose-fishstick/artifacts/api-server",
+    "port": 4102,
+    "start": "npm start",
+    "webLayer": "Layer Three: WhatsApp Bot Center"
+  }
+}
