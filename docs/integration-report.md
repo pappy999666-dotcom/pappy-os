@@ -71,9 +71,4 @@ Each bot has its own token and owner identifier. The backend forwards those sepa
 - WhatsApp service: `GET /stats`, `POST /pair`, `POST /action`.
 
 If the existing bot repos use different route names, add a tiny adapter inside each bot repo that maps these routes to their existing pairing/session functions instead of rewriting bot logic.
-
-## Exact bot repositories and process placement
-- PFP bot repository: `https://github.com/pappy999666-dotcom/pappy-pfp.git`; install path `/opt/pappy/pappy-pfp`; PM2 app `pappy-pfp`; internal port `4101`; website layer: Layer Two.
-- WhatsApp function bot repository: `https://github.com/pappy999666-dotcom/verbose-fishstick.git`; install path `/opt/pappy/verbose-fishstick/artifacts/api-server`; PM2 app `verbose-fishstick`; internal port `4102`; website layer: Layer Three.
-- `scripts/install-bot-repos.sh` clones/updates both repos and installs dependencies in the correct working directories.
-- `deploy/ecosystem.config.cjs` starts all three processes together: the website, the PFP bot, and the WhatsApp function bot.
+<<<<
