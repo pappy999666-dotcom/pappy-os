@@ -1,15 +1,54 @@
 import express from "express";
 import path from "path";
+import fs from "fs";
+import http from "http";
+import crypto from "crypto";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
+import { callBotService, getBotServiceConfig } from "./src/server/botConnectors";
 
 dotenv.config();
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT || 3000);
+const DATA_DIR = process.env.PAPPY_DATA_DIR || path.join(process.cwd(), ".pappy-data");
+const DB_FILE = path.join(DATA_DIR, "state.json");
+const allowedOrigins = (process.env.CORS_ORIGINS || "").split(",").map((origin) => origin.trim()).filter(Boolean);
 
-app.use(express.json({ limit: "50mb" }));
+app.set("trust proxy", 1);
+app.use(express.json({ limit: process.env.JSON_LIMIT || "25mb" }));
+app.use((req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+  const origin = req.headers.origin;
+  if (!origin || allowedOrigins.length === 0 || allowedOrigins.includes(origin)) {
+    if (origin) res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+  }
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization,X-CSRF-Token");
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
+
+const rateBuckets = new Map<string, { count: number; resetAt: number }>();
+app.use((req, res, next) => {
+  const windowMs = Number(process.env.RATE_LIMIT_WINDOW_MS || 60_000);
+  const max = Number(process.env.RATE_LIMIT_MAX || 120);
+  const key = req.ip || "unknown";
+  const now = Date.now();
+  const bucket = rateBuckets.get(key);
+  if (!bucket || bucket.resetAt < now) {
+    rateBuckets.set(key, { count: 1, resetAt: now + windowMs });
+    return next();
+  }
+  bucket.count += 1;
+  if (bucket.count > max) return res.status(429).json({ error: "Too many requests. Please retry shortly." });
+  next();
+});
 
 // Lazy initializer for Gemini client
 let aiInstance: GoogleGenAI | null = null;
@@ -105,6 +144,53 @@ const consoleLogs = [
   { type: "info", message: "[SCHEDULER] Triggered daily PFP change job 'sched_1'.", timestamp: "08:35:00" },
   { type: "success", message: "[PFP] Updated WhatsApp Profile Picture successfully. (Aspect: Wide, AspectRatio preserved via blur letterboxes)", timestamp: "08:35:02" },
 ];
+
+type RuntimeEvent = { channel: string; payload: unknown; timestamp: string };
+type WsClient = { write: (frame: Buffer) => void; destroy: () => void };
+const wsClients = new Set<WsClient>();
+
+function ensureDataDir() { fs.mkdirSync(DATA_DIR, { recursive: true }); }
+function saveState() {
+  ensureDataDir();
+  const safeSchedules = pfpSchedules.map(({ id, phone, aspect, scheduledTime, repeat, status, created }) => ({ id, phone, aspect, scheduledTime, repeat, status, created }));
+  fs.writeFileSync(DB_FILE, JSON.stringify({ schedules: safeSchedules, botSession, logs: consoleLogs.slice(-200), savedAt: new Date().toISOString() }, null, 2));
+}
+function loadState() {
+  try {
+    if (!fs.existsSync(DB_FILE)) return;
+    const state = JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
+    if (Array.isArray(state.schedules)) pfpSchedules.splice(0, pfpSchedules.length, ...state.schedules);
+    if (state.botSession && typeof state.botSession === "object") botSession = { ...botSession, ...state.botSession };
+    if (Array.isArray(state.logs)) consoleLogs.splice(0, consoleLogs.length, ...state.logs.slice(-200));
+  } catch (error) {
+    console.error("State recovery failed; quarantining corrupt state file", error);
+    fs.renameSync(DB_FILE, path.join(DATA_DIR, `state.corrupt.${Date.now()}.json`));
+  }
+}
+function writeWsFrame(data: string) {
+  const payload = Buffer.from(data);
+  const header = payload.length < 126 ? Buffer.from([0x81, payload.length]) : Buffer.from([0x81, 126, payload.length >> 8, payload.length & 255]);
+  return Buffer.concat([header, payload]);
+}
+function broadcast(channel: string, payload: unknown) {
+  const event: RuntimeEvent = { channel, payload, timestamp: new Date().toISOString() };
+  const frame = writeWsFrame(JSON.stringify(event));
+  for (const client of wsClients) {
+    try { client.write(frame); } catch { client.destroy(); wsClients.delete(client); }
+  }
+}
+function pushLog(type: string, message: string) {
+  const now = new Date();
+  const timestamp = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}:${String(now.getSeconds()).padStart(2, "0")}`;
+  const log = { type, message, timestamp };
+  consoleLogs.push(log);
+  if (consoleLogs.length > 200) consoleLogs.shift();
+  broadcast("logs", log);
+  saveState();
+  return log;
+}
+
+loadState();
 
 // Media Downloader simulated DB / parser
 interface MediaItem {
@@ -342,10 +428,16 @@ app.get("/api/image-center/gallery", (req, res) => {
 
 // 4. Profile Picture Center APIs
 // Pairing WhatsApp session (One-time or persistent scheduler)
-app.post("/api/pfp-bot/pair", (req, res) => {
+app.post("/api/pfp-bot/pair", async (req, res) => {
   const { phone, method } = req.body;
   if (!phone) {
     return res.status(400).json({ error: "Mainframe warning: Phone node required." });
+  }
+
+  const upstreamPair = await callBotService<{ pairingCode?: string; qrCode?: string; message?: string }>("pfp", "/pair", { phone, method });
+  if (upstreamPair.connected && !upstreamPair.error) {
+    pushLog("info", `[PFP] Pairing delegated to configured pappy-pfp service for +${phone}.`);
+    return res.json({ success: true, source: "pappy-pfp", ...upstreamPair.data });
   }
 
   // Generates pairing code following standard WhatsApp Baileys pattern (e.g. PQ8X-L9Z3)
@@ -384,6 +476,9 @@ app.post("/api/pfp-bot/schedule", (req, res) => {
   };
 
   pfpSchedules.push(newSchedule);
+  pushLog("info", `[SCHEDULER] Stored PFP schedule ${newSchedule.id} for +${phone}.`);
+  broadcast("schedules", pfpSchedules);
+  saveState();
   res.json({ success: true, schedule: newSchedule });
 });
 
@@ -398,16 +493,27 @@ app.post("/api/pfp-bot/schedule/delete", (req, res) => {
   const index = pfpSchedules.findIndex(s => s.id === id);
   if (index !== -1) {
     pfpSchedules.splice(index, 1);
+    pushLog("info", `[SCHEDULER] Purged PFP schedule ${id}; cache/session cleanup requested.`);
+    broadcast("schedules", pfpSchedules);
+    saveState();
     return res.json({ success: true, message: "Scheduler node successfully purged. All cached temporary files deleted." });
   }
   res.status(404).json({ error: "Schedule node not found in core matrix." });
 });
 
 // PFP Immediate Upload (Preserves native longer uncropped dimensions via direct Baileys buffer transmission)
-app.post("/api/pfp-bot/upload-immediate", (req, res) => {
+app.post("/api/pfp-bot/upload-immediate", async (req, res) => {
   const { phone, imageData, width, height } = req.body;
   if (!phone || !imageData) {
     return res.status(400).json({ error: "Empty visual payload received." });
+  }
+
+  const upstreamUpload = await callBotService<{ message?: string; detectedAspect?: string; pfpUrl?: string }>("pfp", "/profile-picture", { phone, imageData, width, height, cleanup: true });
+  if (upstreamUpload.connected && !upstreamUpload.error) {
+    pushLog("success", `[PFP] Profile update delegated to configured pappy-pfp service for +${phone}.`);
+    broadcast("pfp", { phone, status: "completed", source: "pappy-pfp" });
+    saveState();
+    return res.json({ success: true, source: "pappy-pfp", ...upstreamUpload.data });
   }
 
   // The bot bypasses WhatsApp client-side 1:1 cropping by writing directly to the Baileys socket.
@@ -421,6 +527,10 @@ app.post("/api/pfp-bot/upload-immediate", (req, res) => {
   } else if (width && height) {
     detectedAspect = `Native Aspect (${width}x${height})`;
   }
+
+  pushLog("success", `[PFP] Immediate uncropped profile update completed for +${phone}: ${detectedAspect}. Session cleanup requested.`);
+  broadcast("pfp", { phone, detectedAspect, status: "completed" });
+  saveState();
 
   res.json({
     success: true,
@@ -564,7 +674,14 @@ app.post("/api/whatsapp-bot/sync", (req, res) => {
   res.json({ success: true, message: "Telemetry synced successfully.", currentStats: botSession });
 });
 
-app.get("/api/whatsapp-bot/stats", (req, res) => {
+app.get("/api/whatsapp-bot/stats", async (req, res) => {
+  const upstreamStats = await callBotService<UserSession>("whatsapp", "/stats");
+  if (upstreamStats.connected && !upstreamStats.error && upstreamStats.data) {
+    botSession = { ...botSession, ...upstreamStats.data };
+    saveState();
+    return res.json({ success: true, source: "verbose-fishstick", stats: botSession });
+  }
+
   // Simulates small fluctuating CPU and memory for high-fidelity operating system visuals
   const updatedSession = {
     ...botSession,
@@ -576,13 +693,23 @@ app.get("/api/whatsapp-bot/stats", (req, res) => {
   res.json({ success: true, stats: updatedSession });
 });
 
-app.post("/api/whatsapp-bot/pair", (req, res) => {
+app.post("/api/whatsapp-bot/pair", async (req, res) => {
   const { phone } = req.body;
   const now = new Date();
   const timestamp = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}:${String(now.getSeconds()).padStart(2, "0")}`;
 
   if (!phone) {
     return res.status(400).json({ success: false, error: "Phone number is required." });
+  }
+
+  const upstreamPair = await callBotService<{ pairingCode?: string; status?: string }>("whatsapp", "/pair", { phone });
+  if (upstreamPair.connected && !upstreamPair.error) {
+    botSession.phone = phone.replace(/\D/g, "");
+    botSession.status = "pairing";
+    pushLog("info", `[WHATSAPP] Pairing delegated to configured verbose-fishstick service for +${botSession.phone}.`);
+    broadcast("stats", botSession);
+    saveState();
+    return res.json({ success: true, source: "verbose-fishstick", ...upstreamPair.data });
   }
 
   // Generate a high-end 8-digit pairing code (A1B2-C3D4 style)
@@ -625,20 +752,43 @@ app.get("/api/whatsapp-bot/logs", (req, res) => {
   res.json({ success: true, logs: consoleLogs });
 });
 
+app.get("/api/health", (req, res) => {
+  res.json({
+    success: true,
+    status: "ok",
+    uptime: process.uptime(),
+    clients: wsClients.size,
+    dataDir: DATA_DIR,
+    bots: {
+      pfp: Boolean(getBotServiceConfig("pfp")),
+      whatsapp: Boolean(getBotServiceConfig("whatsapp")),
+    },
+  });
+});
+
 app.post("/api/whatsapp-bot/logs/add", (req, res) => {
   const { type, message } = req.body;
   const now = new Date();
   const timestamp = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}:${String(now.getSeconds()).padStart(2, "0")}`;
   const log = { type: type || "info", message: `[WEB_CMD] ${message}`, timestamp };
-  consoleLogs.push(log);
-  if (consoleLogs.length > 50) consoleLogs.shift();
+  pushLog(log.type, log.message);
   res.json({ success: true, log });
 });
 
-app.post("/api/whatsapp-bot/action", (req, res) => {
+app.post("/api/whatsapp-bot/action", async (req, res) => {
   const { action } = req.body;
   const now = new Date();
   const timestamp = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}:${String(now.getSeconds()).padStart(2, "0")}`;
+
+  const upstreamAction = await callBotService<{ status?: UserSession["status"]; message?: string }>("whatsapp", "/action", { action });
+  if (upstreamAction.connected && !upstreamAction.error) {
+    if (upstreamAction.data?.status) botSession.status = upstreamAction.data.status;
+    const upstreamMessage = upstreamAction.data?.message || `[WHATSAPP] Action ${action} delegated to verbose-fishstick.`;
+    pushLog("system", upstreamMessage);
+    broadcast("stats", botSession);
+    saveState();
+    return res.json({ success: true, source: "verbose-fishstick", status: botSession.status, message: upstreamMessage });
+  }
 
   let message = "";
   if (action === "restart") {
@@ -658,7 +808,9 @@ app.post("/api/whatsapp-bot/action", (req, res) => {
     message = "[SYSTEM] Re-establishing transport layer. Syncing group charts.";
   }
 
-  consoleLogs.push({ type: "system", message, timestamp });
+  pushLog("system", message);
+  broadcast("stats", botSession);
+  saveState();
   res.json({ success: true, status: botSession.status, message });
 });
 
@@ -680,7 +832,20 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
+  const server = http.createServer(app);
+  server.on("upgrade", (req, socket) => {
+    if (req.url !== "/ws") return socket.destroy();
+    const key = req.headers["sec-websocket-key"];
+    if (typeof key !== "string") return socket.destroy();
+    const accept = crypto.createHash("sha1").update(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest("base64");
+    socket.write(["HTTP/1.1 101 Switching Protocols", "Upgrade: websocket", "Connection: Upgrade", `Sec-WebSocket-Accept: ${accept}`, "", ""].join("\r\n"));
+    const client = { write: (frame: Buffer) => socket.write(frame), destroy: () => socket.destroy() };
+    wsClients.add(client);
+    socket.on("close", () => wsClients.delete(client));
+    socket.on("error", () => wsClients.delete(client));
+    client.write(writeWsFrame(JSON.stringify({ channel: "hello", payload: { stats: botSession, logs: consoleLogs.slice(-25) }, timestamp: new Date().toISOString() })));
+  });
+  server.listen(PORT, "0.0.0.0", () => {
     console.log(`PAPPY PROJECT server booting on http://0.0.0.0:${PORT}`);
   });
 }

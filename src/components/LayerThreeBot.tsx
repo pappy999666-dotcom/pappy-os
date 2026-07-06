@@ -26,10 +26,30 @@ export default function LayerThreeBot() {
     if (githubAuthed) {
       fetchStats();
       fetchLogs();
-      const interval = setInterval(() => {
-        fetchStats();
-      }, 3000); // Polling stats
-      return () => clearInterval(interval);
+      const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+      const socket = new WebSocket(`${protocol}://${window.location.host}/ws`);
+      socket.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.channel === "hello") {
+            if (data.payload?.stats) setStats(data.payload.stats);
+            if (Array.isArray(data.payload?.logs)) setLogs(data.payload.logs);
+          }
+          if (data.channel === "logs") {
+            setLogs((prev) => [...prev.slice(-199), data.payload]);
+            scrollToConsoleBottom();
+          }
+          if (data.channel === "stats") setStats(data.payload);
+        } catch (error) {
+          console.error("Realtime stream decode error:", error);
+        }
+      };
+      socket.onerror = () => console.warn("Realtime stream unavailable; REST fallback remains active.");
+      const interval = setInterval(fetchStats, 10000);
+      return () => {
+        clearInterval(interval);
+        socket.close();
+      };
     }
   }, [githubAuthed]);
 
